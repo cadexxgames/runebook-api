@@ -2,9 +2,7 @@ import Stripe from 'stripe';
 import { createClient } from '@supabase/supabase-js';
 
 export const config = {
-  api: {
-    bodyParser: false,
-  },
+  api: { bodyParser: false },
 };
 
 async function getRawBody(req) {
@@ -16,16 +14,11 @@ async function getRawBody(req) {
   });
 }
 
-// Map both full URLs and Stripe Payment Link IDs to credit amounts
-// To find your Payment Link IDs: Stripe Dashboard → Payment Links → click each one → ID is in the URL
 const CREDIT_PACK_URLS = {
   'https://buy.stripe.com/8x2aEY2Ggapnfz8e5D33W01': 5,
   'https://buy.stripe.com/4gMbJ2gx6gNL4Uu5z733W02': 15,
   'https://buy.stripe.com/3cI6oI1CcfJH5Yy9Pn33W03': 40,
 };
-
-// We'll also match by checking if the payment link is NOT the Pro subscription link
-const PRO_LINK_URL = 'https://buy.stripe.com/4gMaEY94E8hf0Eef9H33W00';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
@@ -52,25 +45,35 @@ export default async function handler(req, res) {
   }
 
   async function addCredits(userId, credits) {
-    const { data: row } = await supabase.from('users').select('data').eq('id', userId).single();
+    // Read current bonus_credits from dedicated column
+    const { data: row } = await supabase
+      .from('users')
+      .select('bonus_credits, data')
+      .eq('id', userId)
+      .single();
+    
+    const currentCredits = row?.bonus_credits || 0;
+    const newCredits = currentCredits + credits;
+    
+    // Update both the column AND the JSON data for consistency
     const userData = row?.data || {};
-    userData._bonusCredits = (userData._bonusCredits || 0) + credits;
-    await supabase.from('users').update({ data: userData }).eq('id', userId);
-    console.log('Credits updated in DB:', userData._bonusCredits);
+    userData._bonusCredits = newCredits;
+    
+    await supabase
+      .from('users')
+      .update({ bonus_credits: newCredits, data: userData })
+      .eq('id', userId);
+    
+    console.log(`Credits: ${currentCredits} + ${credits} = ${newCredits} for user ${userId}`);
   }
 
   try {
     if (event.type === 'checkout.session.completed') {
       const session = event.data.object;
       const email = session.customer_details?.email || session.customer_email;
-      const paymentLinkId = session.payment_link; // This is a Stripe ID like plink_xxx
+      const paymentLinkId = session.payment_link;
 
-      console.log('Session data:', JSON.stringify({
-        email,
-        paymentLinkId,
-        mode: session.mode,
-        amount: session.amount_total,
-      }));
+      console.log('Checkout completed:', { email, paymentLinkId, mode: session.mode });
 
       if (!email) return res.status(200).json({ received: true });
 
@@ -80,7 +83,6 @@ export default async function handler(req, res) {
         return res.status(200).json({ received: true });
       }
 
-      // Retrieve the full payment link to get its URL
       let isCredits = false;
       let creditAmount = 0;
 
@@ -89,8 +91,6 @@ export default async function handler(req, res) {
           const paymentLink = await stripe.paymentLinks.retrieve(paymentLinkId);
           const linkUrl = paymentLink.url;
           console.log('Payment link URL:', linkUrl);
-
-          // Check if it matches any credit pack URL
           for (const [url, credits] of Object.entries(CREDIT_PACK_URLS)) {
             if (linkUrl && linkUrl.includes(url.split('/').pop())) {
               isCredits = true;
@@ -103,16 +103,12 @@ export default async function handler(req, res) {
         }
       }
 
-      // Also check by mode - subscriptions are 'subscription', one-time are 'payment'
-      if (session.mode === 'payment') {
-        // One-time payment = credit pack
-        // Determine amount by price
-        const amount = session.amount_total; // in cents
-        if (!isCredits) {
-          if (amount <= 200) { isCredits = true; creditAmount = 5; }
-          else if (amount <= 500) { isCredits = true; creditAmount = 15; }
-          else if (amount <= 1000) { isCredits = true; creditAmount = 40; }
-        }
+      // Fallback: one-time payment = credit pack
+      if (!isCredits && session.mode === 'payment') {
+        const amount = session.amount_total;
+        if (amount <= 200) { isCredits = true; creditAmount = 5; }
+        else if (amount <= 500) { isCredits = true; creditAmount = 15; }
+        else if (amount <= 1000) { isCredits = true; creditAmount = 40; }
       }
 
       if (isCredits && creditAmount > 0) {
@@ -122,7 +118,6 @@ export default async function handler(req, res) {
         await addCredits(user.id, total);
         console.log(`Added ${total} credits to ${email}`);
       } else {
-        // Pro subscription
         await supabase.from('users').update({ is_pro: true }).eq('id', user.id);
         console.log('Pro activated for:', email);
       }
