@@ -1,5 +1,4 @@
 // api/extract.js — Extract text from PowerPoint and Word files
-// Deploy to runebook-api Vercel repo as api/extract.js
 import formidable from 'formidable';
 import fs from 'fs';
 import path from 'path';
@@ -11,9 +10,15 @@ export const config = {
 };
 
 export default async function handler(req, res) {
+  // CORS headers
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+  if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-  const form = formidable({ maxFileSize: 10 * 1024 * 1024 }); // 10MB limit
+  const form = formidable({ maxFileSize: 10 * 1024 * 1024 });
 
   form.parse(req, async (err, fields, files) => {
     if (err) return res.status(400).json({ error: 'File parse error: ' + err.message });
@@ -38,7 +43,6 @@ export default async function handler(req, res) {
         const data = fs.readFileSync(filePath);
         const zip = await JSZip.loadAsync(data);
 
-        // Extract text from each slide
         const slideFiles = Object.keys(zip.files)
           .filter(f => f.match(/ppt\/slides\/slide\d+\.xml$/))
           .sort((a, b) => {
@@ -51,15 +55,12 @@ export default async function handler(req, res) {
         for (const slideFile of slideFiles) {
           const content = await zip.files[slideFile].async('string');
           const parsed = await xml2js.parseStringPromise(content);
-          
-          // Extract all text elements from the slide
           const slideText = [];
           const extractText = (obj) => {
             if (!obj) return;
             if (typeof obj === 'string') { if (obj.trim()) slideText.push(obj.trim()); return; }
             if (Array.isArray(obj)) { obj.forEach(extractText); return; }
             if (typeof obj === 'object') {
-              // Prioritize 't' elements which contain actual text in PPTX
               if (obj['a:t']) extractText(obj['a:t']);
               else Object.values(obj).forEach(extractText);
             }
@@ -71,22 +72,20 @@ export default async function handler(req, res) {
           }
         }
         text = slideTexts.join('\n\n');
-
       } else {
         return res.status(400).json({ error: 'Unsupported file type. Use .docx or .pptx' });
       }
 
       if (!text || text.trim().length < 10) {
-        return res.status(400).json({ error: 'Could not extract text from file. Make sure it contains readable text.' });
+        return res.status(400).json({ error: 'Could not extract text from file.' });
       }
 
-      // Clean up temp file
-      fs.unlinkSync(filePath);
+      try { fs.unlinkSync(filePath); } catch(e) {}
 
       res.status(200).json({ text: text.trim(), ext });
     } catch (err) {
       console.error('Extract error:', err);
-      res.status(500).json({ error: 'Failed to extract text: ' + err.message });
+      res.status(500).json({ error: 'Failed to extract: ' + err.message });
     }
   });
 }
